@@ -38,7 +38,7 @@ impl App {
             month: PeriodStats::default(),
             all_time: PeriodStats::default(),
             current_block: CurrentBlockInfo::default(),
-            selected_plan: 0,
+            selected_plan: 1, // Default to Max5
             selected_period: 0,
             last_refresh: Instant::now(),
             last_data_refresh: Instant::now(),
