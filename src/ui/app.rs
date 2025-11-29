@@ -176,12 +176,18 @@ impl App {
             .map(|t| t.with_timezone(&Local).format("%Hh%M").to_string())
             .unwrap_or_else(|| "N/A".to_string());
 
-        // Helper to create progress bar string (capped at 100% visually)
+        // Helper to create progress bar string (NO CAP - shows overflow)
         let make_bar = |pct: f64, width: usize| -> String {
-            let capped_pct = pct.min(100.0);
-            let filled = ((capped_pct / 100.0) * width as f64) as usize;
-            let empty = width.saturating_sub(filled);
-            format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+            let filled = ((pct / 100.0) * width as f64) as usize;
+            if filled <= width {
+                let empty = width - filled;
+                format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+            } else {
+                // Overflow: full bar + extra overflow indicator
+                let overflow = filled - width;
+                let overflow_chars = overflow.min(5); // Max 5 overflow chars
+                format!("{}{}", "█".repeat(width), "▓".repeat(overflow_chars))
+            }
         };
 
         // Helper for color based on percentage
