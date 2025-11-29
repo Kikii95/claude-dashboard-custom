@@ -8,11 +8,11 @@ use ratatui::{
     Frame,
 };
 
-use crate::calculator::{calculate_cost, format_cost, format_tokens, get_tier, get_tier_color};
-use crate::models::{Entry, PeriodStats, PlanLimits, PLANS};
-use crate::parser::{aggregate, filter_this_month, filter_this_week, filter_today, parse_all};
+use crate::calculator::{calculate_cost, format_cost, format_duration, format_tokens, get_tier, get_tier_color};
+use crate::models::{Entry, PeriodStats, PlanLimits, RateLimitInfo, PLANS};
+use crate::parser::{aggregate, calculate_rate_limit, filter_this_month, filter_this_week, filter_today, parse_all};
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1); // 1s for live countdown
 
 pub struct App {
     pub entries: Vec<Entry>,
@@ -20,9 +20,11 @@ pub struct App {
     pub week: PeriodStats,
     pub month: PeriodStats,
     pub all_time: PeriodStats,
+    pub rate_limit: RateLimitInfo,
     pub selected_plan: usize,
     pub selected_period: usize,
     pub last_refresh: Instant,
+    pub last_data_refresh: Instant,
     pub should_quit: bool,
 }
 
@@ -34,9 +36,11 @@ impl App {
             week: PeriodStats::default(),
             month: PeriodStats::default(),
             all_time: PeriodStats::default(),
+            rate_limit: RateLimitInfo::default(),
             selected_plan: 0,
             selected_period: 0,
             last_refresh: Instant::now(),
+            last_data_refresh: Instant::now(),
             should_quit: false,
         };
         app.refresh();
@@ -50,13 +54,21 @@ impl App {
             self.week = aggregate(&filter_this_week(&self.entries), "This Week");
             self.month = aggregate(&filter_this_month(&self.entries), "This Month");
             self.all_time = aggregate(&self.entries, "All Time");
+            self.rate_limit = calculate_rate_limit(&self.entries, self.current_plan().cost_limit);
+            self.last_data_refresh = Instant::now();
         }
         self.last_refresh = Instant::now();
     }
 
     pub fn maybe_refresh(&mut self) {
-        if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
+        // Data refresh every 5 seconds
+        if self.last_data_refresh.elapsed() >= Duration::from_secs(5) {
             self.refresh();
+        }
+        // UI refresh every second for countdown
+        if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
+            self.rate_limit = calculate_rate_limit(&self.entries, self.current_plan().cost_limit);
+            self.last_refresh = Instant::now();
         }
     }
 
@@ -83,6 +95,8 @@ impl App {
 
     pub fn next_plan(&mut self) {
         self.selected_plan = (self.selected_plan + 1) % PLANS.len();
+        // Recalculate rate limit with new plan
+        self.rate_limit = calculate_rate_limit(&self.entries, self.current_plan().cost_limit);
     }
 
     pub fn draw(&self, frame: &mut Frame) {
@@ -121,46 +135,48 @@ impl App {
     }
 
     fn draw_content(&self, frame: &mut Frame, area: Rect) {
-        // Split into left (stats) and right (models)
+        // Split into left (stats + rate limit) and right (models)
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
 
-        self.draw_stats_panel(frame, chunks[0]);
+        self.draw_left_panel(frame, chunks[0]);
         self.draw_models_panel(frame, chunks[1]);
     }
 
-    fn draw_stats_panel(&self, frame: &mut Frame, area: Rect) {
-        let stats = self.current_stats();
-        let plan = self.current_plan();
-
+    fn draw_left_panel(&self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(8),  // Summary
-                Constraint::Length(7),  // Plan progress
-                Constraint::Min(5),     // Cost breakdown
+                Constraint::Length(7),  // Summary
+                Constraint::Length(9),  // Rate Limit (5h window) - KEY FEATURE
+                Constraint::Length(5),  // Plan progress
+                Constraint::Min(3),     // By tier
             ])
             .split(area);
 
-        // Summary block
+        self.draw_summary(frame, chunks[0]);
+        self.draw_rate_limit(frame, chunks[1]);
+        self.draw_plan_progress(frame, chunks[2]);
+        self.draw_tier_costs(frame, chunks[3]);
+    }
+
+    fn draw_summary(&self, frame: &mut Frame, area: Rect) {
+        let stats = self.current_stats();
+
         let summary_text = vec![
             Line::from(vec![
-                Span::styled("  💰 Cost:    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 💰 Cost:    ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format_cost(stats.total_cost), Style::default().fg(Color::Yellow).bold()),
             ]),
             Line::from(vec![
-                Span::styled("  📊 Tokens:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 📊 Tokens:  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format_tokens(stats.total_tokens), Style::default().fg(Color::Green).bold()),
             ]),
             Line::from(vec![
-                Span::styled("  📞 Calls:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" 📞 Calls:   ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{}", stats.total_calls), Style::default().fg(Color::Blue).bold()),
-            ]),
-            Line::from(vec![
-                Span::styled("  🔗 Sessions:", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!(" {}", stats.session_count), Style::default().fg(Color::Magenta).bold()),
             ]),
         ];
 
@@ -174,44 +190,120 @@ impl App {
                     .padding(Padding::vertical(1)),
             );
 
-        frame.render_widget(summary, chunks[0]);
+        frame.render_widget(summary, area);
+    }
 
-        // Plan progress
+    fn draw_rate_limit(&self, frame: &mut Frame, area: Rect) {
+        let rl = &self.rate_limit;
+        let plan = self.current_plan();
+
+        // Calculate usage percentage for 5h window
+        let usage_pct = ((rl.window_cost / plan.cost_limit) * 100.0).min(999.0);
+        let is_over = usage_pct >= 100.0;
+
+        let status_color = if is_over {
+            Color::Red
+        } else if usage_pct >= 80.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
+        let status_icon = if is_over { "🔴" } else if usage_pct >= 80.0 { "🟡" } else { "🟢" };
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(format!(" {} ", status_icon), Style::default()),
+                Span::styled(format!("{:.0}%", usage_pct), Style::default().fg(status_color).bold()),
+                Span::styled(format!(" of {} limit", plan.name), Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(vec![
+                Span::styled(" 💵 ", Style::default()),
+                Span::styled(format_cost(rl.window_cost), Style::default().fg(Color::Yellow)),
+                Span::styled(format!(" / {}", format_cost(plan.cost_limit)), Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(vec![
+                Span::styled(" 📞 ", Style::default()),
+                Span::styled(format!("{} calls", rl.window_calls), Style::default().fg(Color::Blue)),
+                Span::styled(" in window", Style::default().fg(Color::DarkGray)),
+            ]),
+        ];
+
+        // Countdown to partial reset
+        if let Some(secs) = rl.secs_until_partial_reset {
+            if secs > 0 {
+                let freed = format_cost(rl.partial_reset_cost);
+                lines.push(Line::from(vec![
+                    Span::styled(" ⏱️  ", Style::default()),
+                    Span::styled(format_duration(secs), Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(format!(" → -{}", freed), Style::default().fg(Color::Green)),
+                ]));
+            }
+        }
+
+        // Full reset info
+        if let Some(secs) = rl.secs_until_full_reset {
+            if secs > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(" 🔄 Full reset: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format_duration(secs), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+        }
+
+        let title = if is_over {
+            " ⚠️  5H RATE LIMIT "
+        } else {
+            " ⏰ 5h Window "
+        };
+
+        let border_color = if is_over { Color::Red } else { Color::Cyan };
+
+        let panel = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .title(title)
+                    .title_style(Style::default().fg(border_color).bold())
+                    .padding(Padding::horizontal(1)),
+            );
+
+        frame.render_widget(panel, area);
+    }
+
+    fn draw_plan_progress(&self, frame: &mut Frame, area: Rect) {
+        let stats = self.current_stats();
+        let plan = self.current_plan();
+
         let cost_pct = ((stats.total_cost / plan.cost_limit) * 100.0).min(100.0) as u16;
-        let calls_pct = ((stats.total_calls as f64 / plan.message_limit as f64) * 100.0).min(100.0) as u16;
-
         let cost_color = if cost_pct < 70 { Color::Green } else if cost_pct < 90 { Color::Yellow } else { Color::Red };
-        let calls_color = if calls_pct < 70 { Color::Green } else if calls_pct < 90 { Color::Yellow } else { Color::Red };
 
-        let plan_chunks = Layout::default()
+        let inner = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([Constraint::Length(2), Constraint::Length(2)])
-            .split(chunks[1]);
+            .constraints([Constraint::Length(2)])
+            .split(area);
 
-        let cost_gauge = Gauge::default()
-            .block(Block::default().title(format!("Cost: {} / {}", format_cost(stats.total_cost), format_cost(plan.cost_limit))))
+        let gauge = Gauge::default()
+            .block(Block::default().title(format!("{}: {} / {}", stats.period_label, format_cost(stats.total_cost), format_cost(plan.cost_limit))))
             .gauge_style(Style::default().fg(cost_color))
             .percent(cost_pct)
             .label(format!("{}%", cost_pct));
 
-        let calls_gauge = Gauge::default()
-            .block(Block::default().title(format!("Calls: {} / {}", stats.total_calls, plan.message_limit)))
-            .gauge_style(Style::default().fg(calls_color))
-            .percent(calls_pct)
-            .label(format!("{}%", calls_pct));
-
-        let plan_block = Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
-            .title(format!(" Plan: {} [p] ", plan.name))
+            .title(format!(" {} [p] ", plan.name))
             .title_style(Style::default().fg(Color::Blue).bold());
 
-        frame.render_widget(plan_block, chunks[1]);
-        frame.render_widget(cost_gauge, plan_chunks[0]);
-        frame.render_widget(calls_gauge, plan_chunks[1]);
+        frame.render_widget(block, area);
+        frame.render_widget(gauge, inner[0]);
+    }
 
-        // Cost by tier
+    fn draw_tier_costs(&self, frame: &mut Frame, area: Rect) {
+        let stats = self.current_stats();
+
         let mut tier_costs: Vec<(&str, f64, Color)> = Vec::new();
         for model in &stats.models {
             let tier = get_tier(&model.model);
@@ -229,7 +321,7 @@ impl App {
             .iter()
             .map(|(tier, cost, color)| {
                 Line::from(vec![
-                    Span::styled(format!("  {} ", tier), Style::default().fg(*color).bold()),
+                    Span::styled(format!(" {} ", tier), Style::default().fg(*color).bold()),
                     Span::styled(format_cost(*cost), Style::default().fg(Color::White)),
                 ])
             })
@@ -240,11 +332,10 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray))
-                    .title(" By Tier ")
-                    .padding(Padding::vertical(1)),
+                    .title(" By Tier "),
             );
 
-        frame.render_widget(tier_block, chunks[2]);
+        frame.render_widget(tier_block, area);
     }
 
     fn draw_models_panel(&self, frame: &mut Frame, area: Rect) {
@@ -262,7 +353,6 @@ impl App {
                 let color = get_tier_color(&m.model);
                 let cost = calculate_cost(m);
 
-                // Shorten model name
                 let short_name = m.model
                     .replace("claude-", "")
                     .replace("-20", " '")
@@ -309,12 +399,7 @@ impl App {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        let elapsed = self.last_refresh.elapsed().as_secs();
-        let next_refresh = if REFRESH_INTERVAL.as_secs() > elapsed {
-            REFRESH_INTERVAL.as_secs() - elapsed
-        } else {
-            0
-        };
+        let data_age = self.last_data_refresh.elapsed().as_secs();
 
         let footer = Paragraph::new(Line::from(vec![
             Span::styled(" ←/→ ", Style::default().fg(Color::Yellow)),
@@ -329,7 +414,7 @@ impl App {
             Span::styled("q ", Style::default().fg(Color::Yellow)),
             Span::styled("Quit", Style::default().fg(Color::DarkGray)),
             Span::raw(" │ "),
-            Span::styled(format!("⟳ {}s", next_refresh), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("Data: {}s ago", data_age), Style::default().fg(Color::DarkGray)),
         ]))
         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
 

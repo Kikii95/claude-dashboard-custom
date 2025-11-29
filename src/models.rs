@@ -118,3 +118,24 @@ pub const PLANS: &[PlanLimits] = &[
     PlanLimits { name: "Max5", cost_limit: 35.0, message_limit: 1000 },
     PlanLimits { name: "Max20", cost_limit: 140.0, message_limit: 2000 },
 ];
+
+/// Rate limit tracking (5-hour rolling window)
+#[derive(Debug, Clone, Default)]
+pub struct RateLimitInfo {
+    /// Cost used in current 5h window
+    pub window_cost: f64,
+    /// Calls in current 5h window
+    pub window_calls: u64,
+    /// Tokens in current 5h window
+    pub window_tokens: u64,
+    /// Seconds until oldest entry expires (partial reset)
+    pub secs_until_partial_reset: Option<i64>,
+    /// Cost that will be freed at partial reset
+    pub partial_reset_cost: f64,
+    /// Seconds until full window reset (5h from now if no activity)
+    pub secs_until_full_reset: Option<i64>,
+    /// Oldest entry timestamp in window
+    pub oldest_entry: Option<DateTime<Utc>>,
+    /// Whether currently rate limited (estimate)
+    pub is_limited: bool,
+}

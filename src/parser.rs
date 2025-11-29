@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::{Duration, Local, Utc};
 
-use crate::calculator::calculate_cost;
-use crate::models::{Entry, ModelStats, PeriodStats, RawEntry};
+use crate::calculator::{calculate_cost, calculate_entry_cost};
+use crate::models::{Entry, ModelStats, PeriodStats, RateLimitInfo, RawEntry};
 
 /// Get the Claude data directory
 pub fn get_data_dir() -> Option<PathBuf> {
@@ -172,4 +172,80 @@ pub fn get_all_stats(entries: &[Entry]) -> (PeriodStats, PeriodStats, PeriodStat
     let all_time = aggregate(entries, "All Time");
 
     (today, week, month, all_time)
+}
+
+/// 5-hour window constant
+const RATE_LIMIT_WINDOW_HOURS: i64 = 5;
+
+/// Filter entries within the 5-hour rate limit window
+pub fn filter_rate_limit_window(entries: &[Entry]) -> Vec<Entry> {
+    let cutoff = Utc::now() - Duration::hours(RATE_LIMIT_WINDOW_HOURS);
+    entries
+        .iter()
+        .filter(|e| e.timestamp >= cutoff)
+        .cloned()
+        .collect()
+}
+
+/// Calculate rate limit info for the 5-hour rolling window
+pub fn calculate_rate_limit(entries: &[Entry], plan_cost_limit: f64) -> RateLimitInfo {
+    let now = Utc::now();
+    let window_entries = filter_rate_limit_window(entries);
+
+    if window_entries.is_empty() {
+        return RateLimitInfo::default();
+    }
+
+    // Calculate totals for the window
+    let mut window_cost = 0.0;
+    let mut window_tokens = 0u64;
+    let window_calls = window_entries.len() as u64;
+
+    for entry in &window_entries {
+        window_cost += calculate_entry_cost(entry);
+        window_tokens += entry.usage.total();
+    }
+
+    // Find oldest entry
+    let oldest = window_entries.first().map(|e| e.timestamp);
+
+    // Calculate when oldest entry expires (partial reset)
+    let secs_until_partial_reset = oldest.map(|ts| {
+        let expires_at = ts + Duration::hours(RATE_LIMIT_WINDOW_HOURS);
+        (expires_at - now).num_seconds().max(0)
+    });
+
+    // Calculate cost that will be freed at partial reset
+    // Group entries by minute to find first batch
+    let partial_reset_cost = if let Some(oldest_ts) = oldest {
+        let first_minute = oldest_ts + Duration::minutes(1);
+        window_entries
+            .iter()
+            .take_while(|e| e.timestamp < first_minute)
+            .map(calculate_entry_cost)
+            .sum()
+    } else {
+        0.0
+    };
+
+    // Full reset = when all entries expire (5h from now if no new activity)
+    let newest = window_entries.last().map(|e| e.timestamp);
+    let secs_until_full_reset = newest.map(|ts| {
+        let expires_at = ts + Duration::hours(RATE_LIMIT_WINDOW_HOURS);
+        (expires_at - now).num_seconds().max(0)
+    });
+
+    // Estimate if rate limited (cost > 80% of limit)
+    let is_limited = window_cost >= plan_cost_limit * 0.8;
+
+    RateLimitInfo {
+        window_cost,
+        window_calls,
+        window_tokens,
+        secs_until_partial_reset,
+        partial_reset_cost,
+        secs_until_full_reset,
+        oldest_entry: oldest,
+        is_limited,
+    }
 }

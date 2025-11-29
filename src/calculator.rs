@@ -1,4 +1,4 @@
-use crate::models::ModelStats;
+use crate::models::{Entry, ModelStats};
 
 /// Pricing per million tokens
 #[derive(Debug, Clone, Copy)]
@@ -99,5 +99,36 @@ pub fn format_cost(cost: f64) -> String {
         format!("${:.1}", cost)
     } else {
         format!("${:.2}", cost)
+    }
+}
+
+/// Calculate cost for a single entry
+pub fn calculate_entry_cost(entry: &Entry) -> f64 {
+    let pricing = get_pricing(&entry.model);
+    let million = 1_000_000.0;
+    let u = &entry.usage;
+
+    (u.input_tokens as f64 / million) * pricing.input
+        + (u.output_tokens as f64 / million) * pricing.output
+        + (u.cache_creation_input_tokens as f64 / million) * pricing.cache_create
+        + (u.cache_read_input_tokens as f64 / million) * pricing.cache_read
+}
+
+/// Format duration in human readable format
+pub fn format_duration(secs: i64) -> String {
+    if secs <= 0 {
+        return "now".to_string();
+    }
+
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    let secs = secs % 60;
+
+    if hours > 0 {
+        format!("{}h {:02}m", hours, mins)
+    } else if mins > 0 {
+        format!("{}m {:02}s", mins, secs)
+    } else {
+        format!("{}s", secs)
     }
 }
