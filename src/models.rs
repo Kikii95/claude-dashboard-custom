@@ -105,18 +105,19 @@ pub struct PeriodStats {
     pub period_label: String,
 }
 
-/// Plan limits
+/// Plan limits (from claude-monitor/core/plans.py)
 #[derive(Debug, Clone)]
 pub struct PlanLimits {
     pub name: &'static str,
+    pub token_limit: u64,
     pub cost_limit: f64,
     pub message_limit: u64,
 }
 
 pub const PLANS: &[PlanLimits] = &[
-    PlanLimits { name: "Pro", cost_limit: 18.0, message_limit: 250 },
-    PlanLimits { name: "Max5", cost_limit: 35.0, message_limit: 1000 },
-    PlanLimits { name: "Max20", cost_limit: 140.0, message_limit: 2000 },
+    PlanLimits { name: "Pro", token_limit: 19_000, cost_limit: 18.0, message_limit: 250 },
+    PlanLimits { name: "Max5", token_limit: 88_000, cost_limit: 35.0, message_limit: 1_000 },
+    PlanLimits { name: "Max20", token_limit: 220_000, cost_limit: 140.0, message_limit: 2_000 },
 ];
 
 /// A 5-hour session block (like claude-monitor)

@@ -127,15 +127,43 @@ FALLBACK_PRICING: Dict[str, Dict[str, float]] = {
 
 ## 📊 Plans & Limites
 
-### Source : Documentation Anthropic + observation
+### Source : claude-monitor
 
-| Plan | Cost Limit/5h | Messages/5h |
-|------|---------------|-------------|
-| Pro | $18 | 250 |
-| Max5 | $35 | 1000 |
-| Max20 | $140 | 2000 |
+**Fichier analysé** :
+`~/.local/share/uv/tools/claude-monitor/lib/python3.12/site-packages/claude_monitor/core/plans.py`
+
+### Limites découvertes (lignes 47-72)
+
+```python
+PLAN_LIMITS: Dict[PlanType, Dict[str, Any]] = {
+    PlanType.PRO: {
+        "token_limit": 19_000,
+        "cost_limit": 18.0,
+        "message_limit": 250,
+    },
+    PlanType.MAX5: {
+        "token_limit": 88_000,
+        "cost_limit": 35.0,
+        "message_limit": 1_000,
+    },
+    PlanType.MAX20: {
+        "token_limit": 220_000,
+        "cost_limit": 140.0,
+        "message_limit": 2_000,
+    },
+}
+```
+
+### Tableau récapitulatif (par fenêtre de 5h)
+
+| Plan | Token Limit | Cost Limit | Message Limit |
+|------|-------------|------------|---------------|
+| **Pro** | 19K | $18 | 250 |
+| **Max5** | 88K | $35 | 1,000 |
+| **Max20** | 220K | $140 | 2,000 |
 
 **Note** : Ces limites sont par fenêtre de 5 heures, pas par jour.
+La limite atteinte EN PREMIER déclenche le rate limit.
 
 ---
 
