@@ -119,23 +119,38 @@ pub const PLANS: &[PlanLimits] = &[
     PlanLimits { name: "Max20", cost_limit: 140.0, message_limit: 2000 },
 ];
 
-/// Rate limit tracking (5-hour rolling window)
+/// A 5-hour session block (like claude-monitor)
+#[derive(Debug, Clone)]
+pub struct SessionBlock {
+    /// Block start time (rounded to hour)
+    pub start_time: DateTime<Utc>,
+    /// Block end time (start + 5h = reset time)
+    pub end_time: DateTime<Utc>,
+    /// Is this the currently active block?
+    pub is_active: bool,
+    /// Entries in this block
+    pub entries: Vec<Entry>,
+    /// Stats for this block
+    pub stats: PeriodStats,
+}
+
+/// Current block info for display
 #[derive(Debug, Clone, Default)]
-pub struct RateLimitInfo {
-    /// Cost used in current 5h window
-    pub window_cost: f64,
-    /// Calls in current 5h window
-    pub window_calls: u64,
-    /// Tokens in current 5h window
-    pub window_tokens: u64,
-    /// Seconds until oldest entry expires (partial reset)
-    pub secs_until_partial_reset: Option<i64>,
-    /// Cost that will be freed at partial reset
-    pub partial_reset_cost: f64,
-    /// Seconds until full window reset (5h from now if no activity)
-    pub secs_until_full_reset: Option<i64>,
-    /// Oldest entry timestamp in window
-    pub oldest_entry: Option<DateTime<Utc>>,
-    /// Whether currently rate limited (estimate)
-    pub is_limited: bool,
+pub struct CurrentBlockInfo {
+    /// Block start time
+    pub block_start: Option<DateTime<Utc>>,
+    /// Block end time (= reset time!)
+    pub reset_time: Option<DateTime<Utc>>,
+    /// Seconds until reset
+    pub secs_until_reset: i64,
+    /// Cost used in this block
+    pub block_cost: f64,
+    /// Tokens used in this block
+    pub block_tokens: u64,
+    /// Calls in this block
+    pub block_calls: u64,
+    /// Is currently active (within 5h window)?
+    pub is_active: bool,
+    /// Percentage of plan limit used
+    pub usage_percent: f64,
 }

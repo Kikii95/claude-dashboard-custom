@@ -4,10 +4,13 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use chrono::{Duration, Local, Utc};
+use chrono::{Duration, Local, Timelike, Utc, DateTime};
 
 use crate::calculator::{calculate_cost, calculate_entry_cost};
-use crate::models::{Entry, ModelStats, PeriodStats, RateLimitInfo, RawEntry};
+use crate::models::{CurrentBlockInfo, Entry, ModelStats, PeriodStats, RawEntry, SessionBlock};
+
+/// Session duration in hours
+const SESSION_HOURS: i64 = 5;
 
 /// Get the Claude data directory
 pub fn get_data_dir() -> Option<PathBuf> {
@@ -71,15 +74,120 @@ pub fn parse_all() -> Result<Vec<Entry>> {
     Ok(all_entries)
 }
 
-/// Filter entries by time period
-#[allow(dead_code)]
-pub fn filter_by_days(entries: &[Entry], days: i64) -> Vec<Entry> {
-    let cutoff = Utc::now() - Duration::days(days);
-    entries
-        .iter()
-        .filter(|e| e.timestamp >= cutoff)
-        .cloned()
-        .collect()
+/// Round timestamp to the start of its hour (like claude-monitor)
+fn round_to_hour(ts: DateTime<Utc>) -> DateTime<Utc> {
+    ts.with_minute(0)
+        .unwrap()
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap()
+}
+
+/// Create session blocks from entries (5-hour blocks like claude-monitor)
+pub fn create_blocks(entries: &[Entry]) -> Vec<SessionBlock> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut blocks: Vec<SessionBlock> = Vec::new();
+    let session_duration = Duration::hours(SESSION_HOURS);
+
+    for entry in entries {
+        // Check if we need a new block
+        let need_new_block = match blocks.last() {
+            None => true,
+            Some(current) => {
+                // New block if entry is past current block's end time
+                // OR if there's been a 5h+ gap since last entry
+                entry.timestamp >= current.end_time
+                    || (current.entries.last().map_or(true, |last| {
+                        entry.timestamp - last.timestamp >= session_duration
+                    }))
+            }
+        };
+
+        if need_new_block {
+            let start_time = round_to_hour(entry.timestamp);
+            let end_time = start_time + session_duration;
+
+            blocks.push(SessionBlock {
+                start_time,
+                end_time,
+                is_active: false,
+                entries: Vec::new(),
+                stats: PeriodStats::default(),
+            });
+        }
+
+        // Add entry to current block
+        if let Some(block) = blocks.last_mut() {
+            block.entries.push(entry.clone());
+        }
+    }
+
+    // Mark active blocks and calculate stats
+    let now = Utc::now();
+    for block in &mut blocks {
+        block.is_active = block.end_time > now && block.start_time <= now;
+        block.stats = aggregate(&block.entries, "Block");
+    }
+
+    blocks
+}
+
+/// Find the current active block (or most recent if none active)
+pub fn find_current_block(blocks: &[SessionBlock]) -> Option<&SessionBlock> {
+    // First try to find an active block
+    if let Some(active) = blocks.iter().find(|b| b.is_active) {
+        return Some(active);
+    }
+    // Otherwise return the most recent
+    blocks.last()
+}
+
+/// Get current block info for display
+pub fn get_current_block_info(entries: &[Entry], plan_cost_limit: f64) -> CurrentBlockInfo {
+    let blocks = create_blocks(entries);
+    let now = Utc::now();
+
+    // Find current or most recent block
+    let current = find_current_block(&blocks);
+
+    match current {
+        Some(block) => {
+            let secs_until_reset = (block.end_time - now).num_seconds().max(0);
+            let is_active = block.is_active;
+
+            // Calculate block stats
+            let mut block_cost = 0.0;
+            let mut block_tokens = 0u64;
+            let block_calls = block.entries.len() as u64;
+
+            for entry in &block.entries {
+                block_cost += calculate_entry_cost(entry);
+                block_tokens += entry.usage.total();
+            }
+
+            let usage_percent = if plan_cost_limit > 0.0 {
+                (block_cost / plan_cost_limit) * 100.0
+            } else {
+                0.0
+            };
+
+            CurrentBlockInfo {
+                block_start: Some(block.start_time),
+                reset_time: Some(block.end_time),
+                secs_until_reset,
+                block_cost,
+                block_tokens,
+                block_calls,
+                is_active,
+                usage_percent,
+            }
+        }
+        None => CurrentBlockInfo::default(),
+    }
 }
 
 /// Filter entries for today only
@@ -160,92 +268,5 @@ pub fn aggregate(entries: &[Entry], label: &str) -> PeriodStats {
         total_calls,
         session_count: sessions.len(),
         period_label: label.to_string(),
-    }
-}
-
-/// Get stats for different periods
-#[allow(dead_code)]
-pub fn get_all_stats(entries: &[Entry]) -> (PeriodStats, PeriodStats, PeriodStats, PeriodStats) {
-    let today = aggregate(&filter_today(entries), "Today");
-    let week = aggregate(&filter_this_week(entries), "This Week");
-    let month = aggregate(&filter_this_month(entries), "This Month");
-    let all_time = aggregate(entries, "All Time");
-
-    (today, week, month, all_time)
-}
-
-/// 5-hour window constant
-const RATE_LIMIT_WINDOW_HOURS: i64 = 5;
-
-/// Filter entries within the 5-hour rate limit window
-pub fn filter_rate_limit_window(entries: &[Entry]) -> Vec<Entry> {
-    let cutoff = Utc::now() - Duration::hours(RATE_LIMIT_WINDOW_HOURS);
-    entries
-        .iter()
-        .filter(|e| e.timestamp >= cutoff)
-        .cloned()
-        .collect()
-}
-
-/// Calculate rate limit info for the 5-hour rolling window
-pub fn calculate_rate_limit(entries: &[Entry], plan_cost_limit: f64) -> RateLimitInfo {
-    let now = Utc::now();
-    let window_entries = filter_rate_limit_window(entries);
-
-    if window_entries.is_empty() {
-        return RateLimitInfo::default();
-    }
-
-    // Calculate totals for the window
-    let mut window_cost = 0.0;
-    let mut window_tokens = 0u64;
-    let window_calls = window_entries.len() as u64;
-
-    for entry in &window_entries {
-        window_cost += calculate_entry_cost(entry);
-        window_tokens += entry.usage.total();
-    }
-
-    // Find oldest entry
-    let oldest = window_entries.first().map(|e| e.timestamp);
-
-    // Calculate when oldest entry expires (partial reset)
-    let secs_until_partial_reset = oldest.map(|ts| {
-        let expires_at = ts + Duration::hours(RATE_LIMIT_WINDOW_HOURS);
-        (expires_at - now).num_seconds().max(0)
-    });
-
-    // Calculate cost that will be freed at partial reset
-    // Group entries by minute to find first batch
-    let partial_reset_cost = if let Some(oldest_ts) = oldest {
-        let first_minute = oldest_ts + Duration::minutes(1);
-        window_entries
-            .iter()
-            .take_while(|e| e.timestamp < first_minute)
-            .map(calculate_entry_cost)
-            .sum()
-    } else {
-        0.0
-    };
-
-    // Full reset = when all entries expire (5h from now if no new activity)
-    let newest = window_entries.last().map(|e| e.timestamp);
-    let secs_until_full_reset = newest.map(|ts| {
-        let expires_at = ts + Duration::hours(RATE_LIMIT_WINDOW_HOURS);
-        (expires_at - now).num_seconds().max(0)
-    });
-
-    // Estimate if rate limited (cost > 80% of limit)
-    let is_limited = window_cost >= plan_cost_limit * 0.8;
-
-    RateLimitInfo {
-        window_cost,
-        window_calls,
-        window_tokens,
-        secs_until_partial_reset,
-        partial_reset_cost,
-        secs_until_full_reset,
-        oldest_entry: oldest,
-        is_limited,
     }
 }
