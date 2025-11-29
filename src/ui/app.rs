@@ -162,6 +162,11 @@ impl App {
         let cb = &self.current_block;
         let plan = self.current_plan();
 
+        // Calculate percentages for each metric
+        let cost_pct = if plan.cost_limit > 0.0 { (cb.block_cost / plan.cost_limit) * 100.0 } else { 0.0 };
+        let token_pct = if plan.token_limit > 0 { (cb.block_tokens as f64 / plan.token_limit as f64) * 100.0 } else { 0.0 };
+        let msg_pct = if plan.message_limit > 0 { (cb.block_calls as f64 / plan.message_limit as f64) * 100.0 } else { 0.0 };
+
         // Format reset time in local timezone
         let reset_str = cb.reset_time
             .map(|t| t.with_timezone(&Local).format("%Hh%M").to_string())
@@ -171,39 +176,60 @@ impl App {
             .map(|t| t.with_timezone(&Local).format("%Hh%M").to_string())
             .unwrap_or_else(|| "N/A".to_string());
 
-        // Status based on whether block is active
-        let status_icon = if cb.is_active { "🟢" } else { "⏸️" };
+        // Helper to create progress bar string (capped at 100% visually)
+        let make_bar = |pct: f64, width: usize| -> String {
+            let capped_pct = pct.min(100.0);
+            let filled = ((capped_pct / 100.0) * width as f64) as usize;
+            let empty = width.saturating_sub(filled);
+            format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+        };
+
+        // Helper for color based on percentage
+        let pct_color = |pct: f64| -> Color {
+            if pct >= 100.0 { Color::Red }
+            else if pct >= 80.0 { Color::Yellow }
+            else { Color::Green }
+        };
+
+        let bar_width = 10;
 
         let lines = vec![
-            // Reset time (THE KEY INFO!)
+            // Reset time header
             Line::from(vec![
-                Span::styled(format!(" {} Reset: ", status_icon), Style::default().fg(Color::White)),
+                Span::styled(" 🔄 Reset: ", Style::default().fg(Color::White)),
                 Span::styled(&reset_str, Style::default().fg(Color::Cyan).bold()),
-                Span::styled(format!("  (in {})", format_duration(cb.secs_until_reset)), Style::default().fg(Color::DarkGray)),
-            ]),
-            // Block window
-            Line::from(vec![
-                Span::styled("   Block: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} → {}", block_start_str, reset_str), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" ({})", format_duration(cb.secs_until_reset)), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("  {} → {}", block_start_str, reset_str), Style::default().fg(Color::DarkGray)),
             ]),
             Line::from(""),
-            // Raw usage values (no misleading percentages)
+            // Cost: $X / $Y [████░░] XX%
             Line::from(vec![
-                Span::styled(" 💵 Cost:   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format_cost(cb.block_cost), Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" 💵 ", Style::default()),
+                Span::styled(format!("{:>6}", format_cost(cb.block_cost)), Style::default().fg(Color::Yellow).bold()),
+                Span::styled(format!("/{:<5}", format_cost(plan.cost_limit)), Style::default().fg(Color::DarkGray)),
+                Span::styled(make_bar(cost_pct, bar_width), Style::default().fg(pct_color(cost_pct))),
+                Span::styled(format!(" {:>6.1}%", cost_pct), Style::default().fg(pct_color(cost_pct)).bold()),
             ]),
+            // Tokens: XK / YK [████░░] XX%
             Line::from(vec![
-                Span::styled(" 📊 Tokens: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format_tokens(cb.block_tokens), Style::default().fg(Color::Green).bold()),
+                Span::styled(" 📊 ", Style::default()),
+                Span::styled(format!("{:>6}", format_tokens(cb.block_tokens)), Style::default().fg(Color::Green).bold()),
+                Span::styled(format!("/{:<5}", format_tokens(plan.token_limit)), Style::default().fg(Color::DarkGray)),
+                Span::styled(make_bar(token_pct, bar_width), Style::default().fg(pct_color(token_pct))),
+                Span::styled(format!(" {:>6.1}%", token_pct), Style::default().fg(pct_color(token_pct)).bold()),
             ]),
+            // Messages: X / Y [████░░] XX%
             Line::from(vec![
-                Span::styled(" 📞 Msgs:   ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}", cb.block_calls), Style::default().fg(Color::Blue).bold()),
+                Span::styled(" 📞 ", Style::default()),
+                Span::styled(format!("{:>6}", cb.block_calls), Style::default().fg(Color::Blue).bold()),
+                Span::styled(format!("/{:<5}", plan.message_limit), Style::default().fg(Color::DarkGray)),
+                Span::styled(make_bar(msg_pct, bar_width), Style::default().fg(pct_color(msg_pct))),
+                Span::styled(format!(" {:>6.1}%", msg_pct), Style::default().fg(pct_color(msg_pct)).bold()),
             ]),
         ];
 
         let title = if cb.is_active {
-            format!(" ⏰ {} — Current 5h Block ", plan.name)
+            format!(" ⏰ {} — 5h Block [p] ", plan.name)
         } else {
             " 💤 No Active Block ".to_string()
         };
