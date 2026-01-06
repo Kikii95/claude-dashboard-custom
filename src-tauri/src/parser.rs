@@ -13,8 +13,63 @@ use crate::models::{CurrentBlockInfo, Entry, ModelDistribution, ModelStats, Peri
 const SESSION_HOURS: i64 = 5;
 
 /// Get the Claude data directory
+/// On Windows, tries WSL paths if native path is empty
 pub fn get_data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+    // First try native path
+    let native_path = dirs::home_dir().map(|h| h.join(".claude").join("projects"));
+
+    // On Windows, check if native path exists and has content
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(ref path) = native_path {
+            if path.exists() && std::fs::read_dir(path).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                return native_path;
+            }
+        }
+
+        // Try WSL paths
+        if let Some(wsl_path) = find_wsl_claude_dir() {
+            return Some(wsl_path);
+        }
+    }
+
+    native_path
+}
+
+/// Find Claude data directory in WSL (Windows only)
+#[cfg(target_os = "windows")]
+fn find_wsl_claude_dir() -> Option<PathBuf> {
+    // Common WSL mount points
+    let wsl_prefixes = vec![
+        r"\\wsl.localhost",
+        r"\\wsl$",
+    ];
+
+    // Common distro names
+    let distros = vec!["Ubuntu", "Ubuntu-22.04", "Ubuntu-20.04", "Debian", "openSUSE-Leap-15.5"];
+
+    for prefix in &wsl_prefixes {
+        for distro in &distros {
+            // Try to find home directories
+            let home_base = PathBuf::from(format!("{}\\{}\\home", prefix, distro));
+
+            if let Ok(entries) = std::fs::read_dir(&home_base) {
+                for entry in entries.flatten() {
+                    let user_home = entry.path();
+                    let claude_dir = user_home.join(".claude").join("projects");
+
+                    if claude_dir.exists() {
+                        // Verify it has content
+                        if std::fs::read_dir(&claude_dir).map(|mut d| d.next().is_some()).unwrap_or(false) {
+                            return Some(claude_dir);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Find all JSONL files
