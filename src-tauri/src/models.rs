@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Raw usage data from JSONL
 #[derive(Debug, Deserialize)]
@@ -66,7 +66,7 @@ impl TryFrom<RawEntry> for Entry {
 }
 
 /// Aggregated stats per model
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ModelStats {
     pub model: String,
     pub input_tokens: u64,
@@ -95,7 +95,7 @@ impl ModelStats {
 }
 
 /// Stats for a time period
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PeriodStats {
     pub models: Vec<ModelStats>,
     pub total_tokens: u64,
@@ -106,19 +106,23 @@ pub struct PeriodStats {
 }
 
 /// Plan limits (from claude-monitor/core/plans.py)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlanLimits {
-    pub name: &'static str,
+    pub name: String,
     pub token_limit: u64,
     pub cost_limit: f64,
     pub message_limit: u64,
 }
 
-pub const PLANS: &[PlanLimits] = &[
-    PlanLimits { name: "Pro", token_limit: 19_000, cost_limit: 18.0, message_limit: 250 },
-    PlanLimits { name: "Max5", token_limit: 88_000, cost_limit: 35.0, message_limit: 1_000 },
-    PlanLimits { name: "Max20", token_limit: 220_000, cost_limit: 140.0, message_limit: 2_000 },
-];
+pub fn get_plans() -> Vec<PlanLimits> {
+    vec![
+        PlanLimits { name: "Pro".into(), token_limit: 19_000, cost_limit: 18.0, message_limit: 250 },
+        PlanLimits { name: "Max5".into(), token_limit: 88_000, cost_limit: 35.0, message_limit: 1_000 },
+        PlanLimits { name: "Max20".into(), token_limit: 220_000, cost_limit: 140.0, message_limit: 2_000 },
+    ]
+}
+
+pub static PLANS: std::sync::LazyLock<Vec<PlanLimits>> = std::sync::LazyLock::new(get_plans);
 
 /// A 5-hour session block (like claude-monitor)
 #[derive(Debug, Clone)]
@@ -136,7 +140,7 @@ pub struct SessionBlock {
 }
 
 /// Current block info for display
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CurrentBlockInfo {
     /// Block start time
     pub block_start: Option<DateTime<Utc>>,
@@ -144,14 +148,65 @@ pub struct CurrentBlockInfo {
     pub reset_time: Option<DateTime<Utc>>,
     /// Seconds until reset
     pub secs_until_reset: i64,
-    /// Cost used in this block
-    pub block_cost: f64,
-    /// Tokens used in this block
-    pub block_tokens: u64,
-    /// Calls in this block
-    pub block_calls: u64,
+
+    // === LIMIT METRICS (what counts towards rate limit) ===
+    /// Cost towards limit (input + output only)
+    pub limit_cost: f64,
+    /// Tokens towards limit (input + output only)
+    pub limit_tokens: u64,
+    /// Messages count
+    pub limit_messages: u64,
+
+    // === REAL METRICS (actual usage including cache) ===
+    /// Real total cost (all tokens)
+    pub real_cost: f64,
+    /// Real total tokens (all tokens)
+    pub real_tokens: u64,
+
+    // === PERCENTAGES ===
+    pub cost_percent: f64,
+    pub tokens_percent: f64,
+    pub messages_percent: f64,
+
+    // === BURN RATE ===
+    /// Tokens per minute
+    pub tokens_per_min: f64,
+    /// Cost per minute
+    pub cost_per_min: f64,
+    /// Minutes active in this block
+    pub active_minutes: f64,
+
+    // === PREDICTIONS ===
+    /// Predicted time when tokens run out (timestamp)
+    pub tokens_exhausted_at: Option<DateTime<Utc>>,
+    /// Predicted time when cost limit hit (timestamp)
+    pub cost_exhausted_at: Option<DateTime<Utc>>,
+
     /// Is currently active (within 5h window)?
     pub is_active: bool,
-    /// Percentage of plan limit used
-    pub usage_percent: f64,
+}
+
+/// Model distribution info
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ModelDistribution {
+    pub model: String,
+    pub tier: String,
+    pub calls: u64,
+    pub tokens: u64,
+    pub cost: f64,
+    pub percent: f64,
+}
+
+/// Dashboard data sent to frontend
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardData {
+    pub current_block: CurrentBlockInfo,
+    pub today: PeriodStats,
+    pub week: PeriodStats,
+    pub month: PeriodStats,
+    pub selected_plan: PlanLimits,
+    /// Model distribution in current block
+    pub model_distribution: Vec<ModelDistribution>,
+    /// Warning flags
+    pub warnings: Vec<String>,
 }

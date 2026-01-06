@@ -1,14 +1,10 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.Python
-venv/
-.venv/
+# Dependencies
+node_modules/
 
-# Rust
+# Build outputs
+dist/
 target/
-Cargo.lock
+src-tauri/target/
 
 # IDE
 .idea/
@@ -24,7 +20,8 @@ Thumbs.db
 .env
 .env.local
 
+# Logs
+*.log
 
-# Added by cargo
-
-/target
+# Tauri
+src-tauri/Cargo.lock

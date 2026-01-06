@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::{Duration, Local, Timelike, Utc, DateTime};
 
-use crate::calculator::{calculate_cost, calculate_entry_cost};
-use crate::models::{CurrentBlockInfo, Entry, ModelStats, PeriodStats, RawEntry, SessionBlock};
+use crate::calculator::{calculate_cost, calculate_entry_cost, calculate_entry_limit_cost, get_limit_tokens, get_tier};
+use crate::models::{CurrentBlockInfo, Entry, ModelDistribution, ModelStats, PeriodStats, PlanLimits, RawEntry, SessionBlock};
 
 /// Session duration in hours
 const SESSION_HOURS: i64 = 5;
@@ -136,58 +136,177 @@ pub fn create_blocks(entries: &[Entry]) -> Vec<SessionBlock> {
     blocks
 }
 
-/// Find the current active block (or most recent if none active)
+/// Find the current active block ONLY
+/// Returns None if no block is currently active (= after reset, usage is 0)
 pub fn find_current_block(blocks: &[SessionBlock]) -> Option<&SessionBlock> {
-    // First try to find an active block
-    if let Some(active) = blocks.iter().find(|b| b.is_active) {
-        return Some(active);
-    }
-    // Otherwise return the most recent
-    blocks.last()
+    // Only return a block if it's currently active
+    // If no active block, return None (user starts fresh after reset)
+    blocks.iter().find(|b| b.is_active)
 }
 
-/// Get current block info for display
-pub fn get_current_block_info(entries: &[Entry], plan_cost_limit: f64) -> CurrentBlockInfo {
-    let blocks = create_blocks(entries);
+/// Get current block info for display with all metrics
+pub fn get_current_block_info(entries: &[Entry], plan: &PlanLimits) -> CurrentBlockInfo {
     let now = Utc::now();
 
-    // Find current or most recent block
-    let current = find_current_block(&blocks);
+    // Use the proper block creation logic that handles gaps correctly
+    let blocks = create_blocks(entries);
+    let current_block = find_current_block(&blocks);
 
-    match current {
-        Some(block) => {
-            let secs_until_reset = (block.end_time - now).num_seconds().max(0);
-            let is_active = block.is_active;
+    // If no active block, return empty (session has reset)
+    let block = match current_block {
+        Some(b) => b,
+        None => return CurrentBlockInfo::default(),
+    };
 
-            // Calculate block stats
-            let mut block_cost = 0.0;
-            let mut block_tokens = 0u64;
-            let block_calls = block.entries.len() as u64;
+    let block_start = block.start_time;
+    let block_end = block.end_time;
+    let secs_until_reset = (block_end - now).num_seconds().max(0);
 
-            for entry in &block.entries {
-                block_cost += calculate_entry_cost(entry);
-                block_tokens += entry.usage.total();
-            }
+    // Calculate metrics from THIS BLOCK's entries only
+    let mut limit_cost = 0.0;
+    let mut limit_tokens = 0u64;
+    let limit_messages = block.entries.len() as u64;
+    let mut real_cost = 0.0;
+    let mut real_tokens = 0u64;
 
-            let usage_percent = if plan_cost_limit > 0.0 {
-                (block_cost / plan_cost_limit) * 100.0
+    for entry in &block.entries {
+        limit_cost += calculate_entry_limit_cost(entry);
+        limit_tokens += get_limit_tokens(entry);
+        real_cost += calculate_entry_cost(entry);
+        real_tokens += entry.usage.total();
+    }
+
+    // Calculate percentages
+    let cost_percent = if plan.cost_limit > 0.0 {
+        (limit_cost / plan.cost_limit) * 100.0
+    } else {
+        0.0
+    };
+
+    let tokens_percent = if plan.token_limit > 0 {
+        (limit_tokens as f64 / plan.token_limit as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let messages_percent = if plan.message_limit > 0 {
+        (limit_messages as f64 / plan.message_limit as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Calculate burn rate
+    let active_minutes = if block.entries.len() > 1 {
+        let first_ts = block.entries.first().unwrap().timestamp;
+        let last_ts = block.entries.last().unwrap().timestamp;
+        let duration_mins = (last_ts - first_ts).num_seconds() as f64 / 60.0;
+        duration_mins.max(1.0)
+    } else {
+        1.0
+    };
+
+    let tokens_per_min = limit_tokens as f64 / active_minutes;
+    let cost_per_min = limit_cost / active_minutes;
+
+    // Calculate predictions
+    let tokens_remaining = if limit_tokens < plan.token_limit {
+        plan.token_limit - limit_tokens
+    } else {
+        0
+    };
+    let cost_remaining = if limit_cost < plan.cost_limit {
+        plan.cost_limit - limit_cost
+    } else {
+        0.0
+    };
+
+    let tokens_exhausted_at = if tokens_per_min > 0.0 && tokens_remaining > 0 {
+        let mins_to_exhaust = tokens_remaining as f64 / tokens_per_min;
+        Some(now + Duration::seconds((mins_to_exhaust * 60.0) as i64))
+    } else if tokens_remaining == 0 {
+        Some(now)
+    } else {
+        None
+    };
+
+    let cost_exhausted_at = if cost_per_min > 0.0 && cost_remaining > 0.0 {
+        let mins_to_exhaust = cost_remaining / cost_per_min;
+        Some(now + Duration::seconds((mins_to_exhaust * 60.0) as i64))
+    } else if cost_remaining <= 0.0 {
+        Some(now)
+    } else {
+        None
+    };
+
+    CurrentBlockInfo {
+        block_start: Some(block_start),
+        reset_time: Some(block_end),
+        secs_until_reset,
+        limit_cost,
+        limit_tokens,
+        limit_messages,
+        real_cost,
+        real_tokens,
+        cost_percent,
+        tokens_percent,
+        messages_percent,
+        tokens_per_min,
+        cost_per_min,
+        active_minutes,
+        tokens_exhausted_at,
+        cost_exhausted_at,
+        is_active: block.is_active,
+    }
+}
+
+/// Get model distribution for current active block only
+pub fn get_model_distribution(entries: &[Entry]) -> Vec<ModelDistribution> {
+    // Use the proper block system (same as get_current_block_info)
+    let blocks = create_blocks(entries);
+    let current_block = find_current_block(&blocks);
+
+    let block = match current_block {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+
+    let mut dist_map: HashMap<String, (u64, u64, f64)> = HashMap::new(); // calls, tokens, cost
+    let mut total_cost = 0.0;
+
+    for entry in &block.entries {
+        let tier = get_tier(&entry.model);
+        let cost = calculate_entry_limit_cost(entry);
+        let tokens = get_limit_tokens(entry);
+        total_cost += cost;
+
+        let e = dist_map.entry(tier.to_string()).or_insert((0, 0, 0.0));
+        e.0 += 1;
+        e.1 += tokens;
+        e.2 += cost;
+    }
+
+    let mut result: Vec<ModelDistribution> = dist_map
+        .into_iter()
+        .map(|(tier, (calls, tokens, cost))| {
+            let percent = if total_cost > 0.0 {
+                (cost / total_cost) * 100.0
             } else {
                 0.0
             };
-
-            CurrentBlockInfo {
-                block_start: Some(block.start_time),
-                reset_time: Some(block.end_time),
-                secs_until_reset,
-                block_cost,
-                block_tokens,
-                block_calls,
-                is_active,
-                usage_percent,
+            ModelDistribution {
+                model: tier.clone(),
+                tier,
+                calls,
+                tokens,
+                cost,
+                percent,
             }
-        }
-        None => CurrentBlockInfo::default(),
-    }
+        })
+        .collect();
+
+    // Sort by cost descending
+    result.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+    result
 }
 
 /// Filter entries for today only

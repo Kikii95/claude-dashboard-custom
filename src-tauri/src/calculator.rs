@@ -56,16 +56,15 @@ pub fn get_tier(model: &str) -> &'static str {
     }
 }
 
-/// Get tier color for display
-pub fn get_tier_color(model: &str) -> ratatui::style::Color {
-    use ratatui::style::Color;
+/// Get tier color for display (returns CSS color name)
+pub fn get_tier_color(model: &str) -> &'static str {
     let model_lower = model.to_lowercase();
     if model_lower.contains("opus") {
-        Color::Magenta
+        "magenta"
     } else if model_lower.contains("haiku") {
-        Color::Green
+        "green"
     } else {
-        Color::Cyan
+        "cyan"
     }
 }
 
@@ -102,7 +101,7 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
-/// Calculate cost for a single entry
+/// Calculate FULL cost for a single entry (all tokens including cache)
 pub fn calculate_entry_cost(entry: &Entry) -> f64 {
     let pricing = get_pricing(&entry.model);
     let million = 1_000_000.0;
@@ -112,6 +111,27 @@ pub fn calculate_entry_cost(entry: &Entry) -> f64 {
         + (u.output_tokens as f64 / million) * pricing.output
         + (u.cache_creation_input_tokens as f64 / million) * pricing.cache_create
         + (u.cache_read_input_tokens as f64 / million) * pricing.cache_read
+}
+
+/// Calculate LIMIT cost for a single entry (input + output + cache_creation)
+/// This is what counts towards the rate limit
+/// Note: cache_read does NOT count (already cached), but cache_creation DOES
+pub fn calculate_entry_limit_cost(entry: &Entry) -> f64 {
+    let pricing = get_pricing(&entry.model);
+    let million = 1_000_000.0;
+    let u = &entry.usage;
+
+    // input + output + cache_creation count towards the limit
+    // cache_read does NOT count (it's a discount, already in cache)
+    (u.input_tokens as f64 / million) * pricing.input
+        + (u.output_tokens as f64 / million) * pricing.output
+        + (u.cache_creation_input_tokens as f64 / million) * pricing.cache_create
+}
+
+/// Get limit tokens (input + output + cache_creation)
+/// cache_read does NOT count towards rate limit
+pub fn get_limit_tokens(entry: &Entry) -> u64 {
+    entry.usage.input_tokens + entry.usage.output_tokens + entry.usage.cache_creation_input_tokens
 }
 
 /// Format duration in human readable format
