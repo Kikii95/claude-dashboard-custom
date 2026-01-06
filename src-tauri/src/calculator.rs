@@ -128,10 +128,11 @@ pub fn calculate_entry_limit_cost(entry: &Entry) -> f64 {
         + (u.cache_creation_input_tokens as f64 / million) * pricing.cache_create
 }
 
-/// Get limit tokens (input + output + cache_creation)
-/// cache_read does NOT count towards rate limit
+/// Get limit tokens - OUTPUT TOKENS ONLY
+/// Anthropic rate limits are based on OUTPUT tokens, not input
+/// This matches claude-monitor's calculation
 pub fn get_limit_tokens(entry: &Entry) -> u64 {
-    entry.usage.input_tokens + entry.usage.output_tokens + entry.usage.cache_creation_input_tokens
+    entry.usage.output_tokens
 }
 
 /// Format duration in human readable format
