@@ -54,20 +54,30 @@ jobs:
       - name: Build Tauri app
         run: pnpm tauri build
 
-      - name: Upload Linux artifacts
+      - name: Upload Linux AppImage
         if: matrix.platform == 'ubuntu-22.04'
         uses: actions/upload-artifact@v4
         with:
-          name: claude-dashboard-linux
-          path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          name: claude-dashboard-linux-appimage
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
 
-      - name: Upload Windows artifacts
+      - name: Upload Linux Deb
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-dashboard-linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+
+      - name: Upload Windows MSI
         if: matrix.platform == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: claude-dashboard-windows
-          path: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+          name: claude-dashboard-windows-msi
+          path: src-tauri/target/release/bundle/msi/*.msi
+
+      - name: Upload Windows NSIS
+        if: matrix.platform == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-dashboard-windows-nsis
+          path: src-tauri/target/release/bundle/nsis/*.exe
