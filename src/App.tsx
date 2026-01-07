@@ -212,6 +212,23 @@ const ThemeSelector = ({
   </div>
 );
 
+// Loading Overlay component
+const LoadingOverlay = ({ isVisible }: { isVisible: boolean }) => {
+  if (!isVisible) return null;
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
+      <div className="card p-6 flex flex-col items-center gap-3">
+        <div className="relative">
+          <div className="w-12 h-12 border-4 border-accent-1/30 rounded-full"></div>
+          <div className="w-12 h-12 border-4 border-accent-1 border-t-transparent rounded-full animate-spin absolute top-0 left-0"></div>
+        </div>
+        <span className="text-primary font-medium">Refreshing data...</span>
+        <span className="text-secondary text-xs">Parsing JSONL files</span>
+      </div>
+    </div>
+  );
+};
+
 function App() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [plans, setPlans] = useState<PlanLimits[]>([]);
@@ -220,6 +237,7 @@ function App() {
   const [countdown, setCountdown] = useState(0);
   const [currentTheme, setCurrentTheme] = useState(getStoredTheme());
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     applyTheme(currentTheme);
@@ -238,6 +256,8 @@ function App() {
   }, []);
 
   const fetchData = useCallback(async () => {
+    setIsLoading(true);
+
     try {
       const result = await invoke<DashboardData>("get_dashboard_data", { planIndex });
       setData(result);
@@ -245,6 +265,8 @@ function App() {
       setError(null);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setIsLoading(false);
     }
   }, [planIndex]);
 
@@ -295,6 +317,9 @@ function App() {
 
   return (
     <div className="min-h-screen p-4 space-y-4">
+      {/* Loading Overlay */}
+      <LoadingOverlay isVisible={isLoading} />
+
       {/* Header */}
       <header className="flex items-center justify-between">
         <div>
@@ -317,7 +342,14 @@ function App() {
             isOpen={themeMenuOpen}
             onToggle={() => setThemeMenuOpen(!themeMenuOpen)}
           />
-          <button onClick={fetchData} className="theme-btn p-2" title="Refresh">🔄</button>
+          <button
+            onClick={fetchData}
+            disabled={isLoading}
+            className={`theme-btn p-2 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            title="Refresh"
+          >
+            <span className={isLoading ? 'animate-spin inline-block' : ''}>🔄</span>
+          </button>
         </div>
       </header>
 
@@ -496,7 +528,7 @@ function App() {
 
       {/* Footer */}
       <footer className="text-center text-xs text-secondary opacity-50">
-        Claude Dashboard v0.8.0 • {selected_plan.name} • {themes[currentTheme]?.name}
+        Claude Dashboard v0.8.3 • {selected_plan.name} • {themes[currentTheme]?.name}
       </footer>
     </div>
   );
