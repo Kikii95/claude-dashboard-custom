@@ -1,7 +1,51 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DashboardData, PlanLimits, ModelDistribution } from "./types";
 import { themes, themeKeys, applyTheme, getStoredTheme, storeTheme } from "./themes";
+
+// Settings types
+interface AppSettings {
+  refreshInterval: number; // in seconds, 0 = disabled
+  autoRefresh: boolean;
+  animations: boolean;
+  defaultPlanIndex: number;
+}
+
+const DEFAULT_SETTINGS: AppSettings = {
+  refreshInterval: 60, // 1 minute default
+  autoRefresh: true,
+  animations: true,
+  defaultPlanIndex: 1, // Max5
+};
+
+const REFRESH_OPTIONS = [
+  { value: 30, label: "30s" },
+  { value: 60, label: "1 min" },
+  { value: 120, label: "2 min" },
+  { value: 300, label: "5 min" },
+  { value: 0, label: "Manual" },
+];
+
+// Settings persistence
+const getStoredSettings = (): AppSettings => {
+  try {
+    const stored = localStorage.getItem("claude-dashboard-settings");
+    if (stored) {
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+    }
+  } catch (e) {
+    console.error("Failed to load settings:", e);
+  }
+  return DEFAULT_SETTINGS;
+};
+
+const storeSettings = (settings: AppSettings): void => {
+  try {
+    localStorage.setItem("claude-dashboard-settings", JSON.stringify(settings));
+  } catch (e) {
+    console.error("Failed to save settings:", e);
+  }
+};
 
 // Format helpers
 const formatTokens = (count: number): string => {
@@ -213,14 +257,14 @@ const ThemeSelector = ({
 );
 
 // Loading Overlay component
-const LoadingOverlay = ({ isVisible }: { isVisible: boolean }) => {
+const LoadingOverlay = ({ isVisible, animations }: { isVisible: boolean; animations: boolean }) => {
   if (!isVisible) return null;
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
       <div className="card p-6 flex flex-col items-center gap-3">
         <div className="relative">
           <div className="w-12 h-12 border-4 border-accent-1/30 rounded-full"></div>
-          <div className="w-12 h-12 border-4 border-accent-1 border-t-transparent rounded-full animate-spin absolute top-0 left-0"></div>
+          <div className={`w-12 h-12 border-4 border-accent-1 border-t-transparent rounded-full absolute top-0 left-0 ${animations ? 'animate-spin' : ''}`}></div>
         </div>
         <span className="text-primary font-medium">Refreshing data...</span>
         <span className="text-secondary text-xs">Parsing JSONL files</span>
@@ -229,15 +273,134 @@ const LoadingOverlay = ({ isVisible }: { isVisible: boolean }) => {
   );
 };
 
+// Settings Panel component
+const SettingsPanel = ({
+  settings,
+  onSettingsChange,
+  isOpen,
+  onClose,
+  plans,
+}: {
+  settings: AppSettings;
+  onSettingsChange: (settings: AppSettings) => void;
+  isOpen: boolean;
+  onClose: () => void;
+  plans: PlanLimits[];
+}) => {
+  if (!isOpen) return null;
+
+  const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
+    const newSettings = { ...settings, [key]: value };
+    onSettingsChange(newSettings);
+    storeSettings(newSettings);
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 card p-6 min-w-[320px] max-w-[400px] shadow-2xl">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-gradient">⚙️ Settings</h2>
+          <button onClick={onClose} className="theme-btn p-1.5 text-secondary hover:text-primary">✕</button>
+        </div>
+
+        <div className="space-y-4">
+          {/* Auto Refresh Toggle */}
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Auto Refresh</div>
+              <div className="text-xs text-secondary">Automatically update data</div>
+            </div>
+            <button
+              onClick={() => updateSetting("autoRefresh", !settings.autoRefresh)}
+              className={`w-12 h-6 rounded-full transition-colors relative ${
+                settings.autoRefresh ? "bg-accent-1" : "bg-secondary"
+              }`}
+            >
+              <div
+                className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${
+                  settings.autoRefresh ? "translate-x-6" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Refresh Interval */}
+          <div className={settings.autoRefresh ? "" : "opacity-50 pointer-events-none"}>
+            <div className="text-sm font-medium mb-2">Refresh Interval</div>
+            <div className="flex gap-2">
+              {REFRESH_OPTIONS.filter(o => o.value > 0).map((option) => (
+                <button
+                  key={option.value}
+                  onClick={() => updateSetting("refreshInterval", option.value)}
+                  className={`flex-1 py-1.5 px-2 text-xs rounded-lg border transition-colors ${
+                    settings.refreshInterval === option.value
+                      ? "border-accent-1 bg-accent-1/20 text-accent-1"
+                      : "border-white/10 hover:border-white/30"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Animations Toggle */}
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">Animations</div>
+              <div className="text-xs text-secondary">Enable UI animations</div>
+            </div>
+            <button
+              onClick={() => updateSetting("animations", !settings.animations)}
+              className={`w-12 h-6 rounded-full transition-colors relative ${
+                settings.animations ? "bg-accent-1" : "bg-secondary"
+              }`}
+            >
+              <div
+                className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${
+                  settings.animations ? "translate-x-6" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
+
+          {/* Default Plan */}
+          <div>
+            <div className="text-sm font-medium mb-2">Default Plan</div>
+            <select
+              value={settings.defaultPlanIndex}
+              onChange={(e) => updateSetting("defaultPlanIndex", Number(e.target.value))}
+              className="w-full bg-secondary border border-white/10 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-1"
+            >
+              {plans.map((plan, i) => (
+                <option key={plan.name} value={i}>{plan.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="mt-6 pt-4 border-t border-white/10 text-xs text-secondary text-center">
+          Settings are saved automatically
+        </div>
+      </div>
+    </>
+  );
+};
+
 function App() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [plans, setPlans] = useState<PlanLimits[]>([]);
-  const [planIndex, setPlanIndex] = useState(1); // Default to Max5
+  const [settings, setSettings] = useState<AppSettings>(getStoredSettings());
+  const [planIndex, setPlanIndex] = useState(settings.defaultPlanIndex);
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState(0);
   const [currentTheme, setCurrentTheme] = useState(getStoredTheme());
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const intervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     applyTheme(currentTheme);
@@ -263,6 +426,7 @@ function App() {
       setData(result);
       setCountdown(result.current_block.secs_until_reset);
       setError(null);
+      setLastRefresh(new Date());
     } catch (e) {
       setError(String(e));
     } finally {
@@ -270,11 +434,30 @@ function App() {
     }
   }, [planIndex]);
 
+  // Initial fetch
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 30000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+  }, []);
+
+  // Auto-refresh with configurable interval
+  useEffect(() => {
+    // Clear previous interval
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
+    // Set new interval if auto-refresh is enabled
+    if (settings.autoRefresh && settings.refreshInterval > 0) {
+      intervalRef.current = window.setInterval(fetchData, settings.refreshInterval * 1000);
+    }
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+    };
+  }, [settings.autoRefresh, settings.refreshInterval, fetchData]);
 
   useEffect(() => {
     if (countdown <= 0) return;
@@ -318,13 +501,34 @@ function App() {
   return (
     <div className="min-h-screen p-4 space-y-4">
       {/* Loading Overlay */}
-      <LoadingOverlay isVisible={isLoading} />
+      <LoadingOverlay isVisible={isLoading} animations={settings.animations} />
+
+      {/* Settings Panel */}
+      <SettingsPanel
+        settings={settings}
+        onSettingsChange={setSettings}
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        plans={plans}
+      />
 
       {/* Header */}
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-gradient">Claude Dashboard</h1>
-          <p className="text-secondary text-xs">5h Rate Limit Tracker</p>
+          <div className="flex items-center gap-2 text-xs text-secondary">
+            <span>5h Rate Limit Tracker</span>
+            {lastRefresh && (
+              <span className="opacity-50">
+                • Last: {lastRefresh.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+              </span>
+            )}
+            {settings.autoRefresh && (
+              <span className="text-success opacity-70">
+                • Auto {REFRESH_OPTIONS.find(o => o.value === settings.refreshInterval)?.label}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <select
@@ -343,12 +547,19 @@ function App() {
             onToggle={() => setThemeMenuOpen(!themeMenuOpen)}
           />
           <button
+            onClick={() => setSettingsOpen(true)}
+            className="theme-btn p-2"
+            title="Settings"
+          >
+            ⚙️
+          </button>
+          <button
             onClick={fetchData}
             disabled={isLoading}
             className={`theme-btn p-2 ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
             title="Refresh"
           >
-            <span className={isLoading ? 'animate-spin inline-block' : ''}>🔄</span>
+            <span className={isLoading && settings.animations ? 'animate-spin inline-block' : ''}>🔄</span>
           </button>
         </div>
       </header>
@@ -528,7 +739,7 @@ function App() {
 
       {/* Footer */}
       <footer className="text-center text-xs text-secondary opacity-50">
-        Claude Dashboard v0.8.3 • {selected_plan.name} • {themes[currentTheme]?.name}
+        Claude Dashboard v0.8.4 • {selected_plan.name} • {themes[currentTheme]?.name}
       </footer>
     </div>
   );
